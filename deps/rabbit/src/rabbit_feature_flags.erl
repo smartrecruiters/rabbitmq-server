@@ -86,10 +86,6 @@
          disable_all/0,
          is_supported/1,
          is_supported/2,
-         is_supported_locally/1,
-         is_supported_remotely/1,
-         is_supported_remotely/2,
-         is_supported_remotely/3,
          is_enabled/1,
          is_enabled/2,
          is_disabled/1,
@@ -104,7 +100,6 @@
          is_node_compatible/1,
          is_node_compatible/2,
          sync_feature_flags_with_cluster/2,
-         sync_feature_flags_with_cluster/3,
          refresh_feature_flags_after_app_load/1,
          enabled_feature_flags_list_file/0
         ]).
@@ -112,16 +107,15 @@
 %% RabbitMQ internal use only.
 -export([initialize_registry/0,
          initialize_registry/1,
+         initialize_registry/3,
          mark_as_enabled_locally/2,
          remote_nodes/0,
          running_remote_nodes/0,
          does_node_support/3,
-         merge_feature_flags_from_unknown_apps/1,
-         do_sync_feature_flags_with_node/1]).
+         merge_feature_flags_from_unknown_apps/1]).
 
 -ifdef(TEST).
 -export([inject_test_feature_flags/1,
-         initialize_registry/3,
          query_supported_feature_flags/0,
          mark_as_enabled_remotely/2,
          mark_as_enabled_remotely/4,
@@ -294,37 +288,8 @@ list(Which, Stability)
 %%   feature flag could not be enabled (subsequent feature flags in the
 %%   dependency tree are left unchanged).
 
-enable(FeatureName) when is_atom(FeatureName) ->
-    rabbit_log_feature_flags:debug(
-      "Feature flag `~s`: REQUEST TO ENABLE",
-      [FeatureName]),
-    case is_enabled(FeatureName) of
-        true ->
-            rabbit_log_feature_flags:debug(
-              "Feature flag `~s`: already enabled",
-              [FeatureName]),
-            ok;
-        false ->
-            rabbit_log_feature_flags:debug(
-              "Feature flag `~s`: not enabled, check if supported by cluster",
-              [FeatureName]),
-            %% The feature flag must be supported locally and remotely
-            %% (i.e. by all members of the cluster).
-            case is_supported(FeatureName) of
-                true ->
-                    rabbit_log_feature_flags:info(
-                      "Feature flag `~s`: supported, attempt to enable...",
-                      [FeatureName]),
-                    do_enable(FeatureName);
-                false ->
-                    rabbit_log_feature_flags:error(
-                      "Feature flag `~s`: not supported",
-                      [FeatureName]),
-                    {error, unsupported}
-            end
-    end;
-enable(FeatureNames) when is_list(FeatureNames) ->
-    with_feature_flags(FeatureNames, fun enable/1).
+enable(FeatureNames) ->
+    rabbit_ff_controler:enable(FeatureNames).
 
 -spec enable_all() -> ok | {error, any()}.
 %% @doc
@@ -336,7 +301,8 @@ enable(FeatureNames) when is_list(FeatureNames) ->
 %%   unchanged).
 
 enable_all() ->
-    with_feature_flags(maps:keys(list(all)), fun enable/1).
+    AllFeatureNames = maps:keys(list(all)),
+    enable(AllFeatureNames).
 
 -spec disable(feature_name() | [feature_name()]) -> ok | {error, any()}.
 %% @doc
@@ -349,10 +315,8 @@ enable_all() ->
 %%   feature flag could not be disabled (subsequent feature flags in the
 %%   dependency tree are left unchanged).
 
-disable(FeatureName) when is_atom(FeatureName) ->
-    {error, unsupported};
-disable(FeatureNames) when is_list(FeatureNames) ->
-    with_feature_flags(FeatureNames, fun disable/1).
+disable(FeatureNames) ->
+    rabbit_ff_controler:disable(FeatureNames).
 
 -spec disable_all() -> ok | {error, any()}.
 %% @doc
@@ -364,20 +328,8 @@ disable(FeatureNames) when is_list(FeatureNames) ->
 %%   unchanged).
 
 disable_all() ->
-    with_feature_flags(maps:keys(list(all)), fun disable/1).
-
--spec with_feature_flags([feature_name()],
-                         fun((feature_name()) -> ok | {error, any()})) ->
-    ok | {error, any()}.
-%% @private
-
-with_feature_flags([FeatureName | Rest], Fun) ->
-    case Fun(FeatureName) of
-        ok    -> with_feature_flags(Rest, Fun);
-        Error -> Error
-    end;
-with_feature_flags([], _) ->
-    ok.
+    AllFeatureNames = maps:keys(list(all)),
+    disable(AllFeatureNames).
 
 -spec is_supported(feature_name() | [feature_name()]) -> boolean().
 %% @doc
@@ -393,8 +345,7 @@ with_feature_flags([], _) ->
 %%   `false' if one of them is not or the RPC timed out.
 
 is_supported(FeatureNames) ->
-    is_supported_locally(FeatureNames) andalso
-    is_supported_remotely(FeatureNames).
+    rabbit_ff_controler:are_supported(FeatureNames).
 
 -spec is_supported(feature_name() | [feature_name()], timeout()) ->
     boolean().
@@ -412,8 +363,7 @@ is_supported(FeatureNames) ->
 %%   `false' if one of them is not or the RPC timed out.
 
 is_supported(FeatureNames, Timeout) ->
-    is_supported_locally(FeatureNames) andalso
-    is_supported_remotely(FeatureNames, Timeout).
+    rabbit_ff_controler:are_supported(FeatureNames, Timeout).
 
 -spec is_supported_locally(feature_name() | [feature_name()]) -> boolean().
 %% @doc
@@ -429,53 +379,6 @@ is_supported_locally(FeatureName) when is_atom(FeatureName) ->
     rabbit_ff_registry:is_supported(FeatureName);
 is_supported_locally(FeatureNames) when is_list(FeatureNames) ->
     lists:all(fun(F) -> rabbit_ff_registry:is_supported(F) end, FeatureNames).
-
--spec is_supported_remotely(feature_name() | [feature_name()]) -> boolean().
-%% @doc
-%% Returns if a single feature flag or a set of feature flags is
-%% supported by all remote nodes.
-%%
-%% @param FeatureNames The name or a list of names of the feature flag(s)
-%%   to be checked.
-%% @returns `true' if the set of feature flags is entirely supported, or
-%%   `false' if one of them is not or the RPC timed out.
-
-is_supported_remotely(FeatureNames) ->
-    is_supported_remotely(FeatureNames, ?TIMEOUT).
-
--spec is_supported_remotely(feature_name() | [feature_name()], timeout()) -> boolean().
-%% @doc
-%% Returns if a single feature flag or a set of feature flags is
-%% supported by all remote nodes.
-%%
-%% @param FeatureNames The name or a list of names of the feature flag(s)
-%%   to be checked.
-%% @param Timeout Time in milliseconds after which the RPC gives up.
-%% @returns `true' if the set of feature flags is entirely supported, or
-%%   `false' if one of them is not or the RPC timed out.
-
-is_supported_remotely(FeatureName, Timeout) when is_atom(FeatureName) ->
-    is_supported_remotely([FeatureName], Timeout);
-is_supported_remotely([], _) ->
-    rabbit_log_feature_flags:debug(
-      "Feature flags: skipping query for feature flags support as the "
-      "given list is empty"),
-    true;
-is_supported_remotely(FeatureNames, Timeout) when is_list(FeatureNames) ->
-    case running_remote_nodes() of
-        [] ->
-            rabbit_log_feature_flags:debug(
-              "Feature flags: isolated node; skipping remote node query "
-              "=> consider `~p` supported",
-              [FeatureNames]),
-            true;
-        RemoteNodes ->
-            rabbit_log_feature_flags:debug(
-              "Feature flags: about to query these remote nodes about "
-              "support for `~p`: ~p",
-              [FeatureNames, RemoteNodes]),
-            is_supported_remotely(RemoteNodes, FeatureNames, Timeout)
-    end.
 
 -spec is_supported_remotely([node()],
                             feature_name() | [feature_name()],
@@ -1489,39 +1392,6 @@ enabled_feature_flags_list_file() ->
 %% Feature flags management: enabling.
 %% -------------------------------------------------------------------
 
--spec do_enable(feature_name()) -> ok | {error, any()} | no_return().
-%% @private
-
-do_enable(FeatureName) ->
-    %% We mark this feature flag as "state changing" before doing the
-    %% actual state change. We also take a global lock: this permits
-    %% to block callers asking about a feature flag changing state.
-    global:set_lock(?FF_STATE_CHANGE_LOCK),
-    Ret = case mark_as_enabled(FeatureName, state_changing) of
-              ok ->
-                  case enable_dependencies(FeatureName, true) of
-                      ok ->
-                          case run_migration_fun(FeatureName, enable) of
-                              ok ->
-                                  mark_as_enabled(FeatureName, true);
-                              {error, no_migration_fun} ->
-                                  mark_as_enabled(FeatureName, true);
-                              Error ->
-                                  Error
-                          end;
-                      Error ->
-                          Error
-                  end;
-              Error ->
-                  Error
-          end,
-    case Ret of
-        ok -> ok;
-        _  -> mark_as_enabled(FeatureName, false)
-    end,
-    global:del_lock(?FF_STATE_CHANGE_LOCK),
-    Ret.
-
 -spec enable_locally(feature_name()) -> ok | {error, any()} | no_return().
 %% @private
 
@@ -1618,18 +1488,6 @@ run_migration_fun(FeatureName, FeatureProps, Arg) ->
             {error, {invalid_migration_fun, Invalid}}
     end.
 
--spec mark_as_enabled(feature_name(), feature_state()) ->
-    any() | {error, any()} | no_return().
-%% @private
-
-mark_as_enabled(FeatureName, IsEnabled) ->
-    case mark_as_enabled_locally(FeatureName, IsEnabled) of
-        ok ->
-            mark_as_enabled_remotely(FeatureName, IsEnabled);
-        Error ->
-            Error
-    end.
-
 -spec mark_as_enabled_locally(feature_name(), feature_state()) ->
     any() | {error, any()} | no_return().
 %% @private
@@ -1657,73 +1515,6 @@ mark_as_enabled_locally(FeatureName, IsEnabled) ->
     initialize_registry(#{},
                         #{FeatureName => IsEnabled},
                         WrittenToDisk).
-
--spec mark_as_enabled_remotely(feature_name(), feature_state()) ->
-    any() | {error, any()} | no_return().
-%% @private
-
-mark_as_enabled_remotely(FeatureName, IsEnabled) ->
-    Nodes = running_remote_nodes(),
-    mark_as_enabled_remotely(Nodes, FeatureName, IsEnabled, ?TIMEOUT).
-
--spec mark_as_enabled_remotely([node()],
-                               feature_name(),
-                               feature_state(),
-                               timeout()) ->
-    any() | {error, any()} | no_return().
-%% @private
-
-mark_as_enabled_remotely([], _FeatureName, _IsEnabled, _Timeout) ->
-    ok;
-mark_as_enabled_remotely(Nodes, FeatureName, IsEnabled, Timeout) ->
-    T0 = erlang:timestamp(),
-    Rets = [{Node, rpc:call(Node,
-                            ?MODULE,
-                            mark_as_enabled_locally,
-                            [FeatureName, IsEnabled],
-                            Timeout)}
-            || Node <- Nodes],
-    FailedNodes = [Node || {Node, Ret} <- Rets, Ret =/= ok],
-    case FailedNodes of
-        [] ->
-            rabbit_log_feature_flags:debug(
-              "Feature flags: `~s` successfully marked as enabled=~p on all "
-              "nodes", [FeatureName, IsEnabled]),
-            ok;
-        _ ->
-            rabbit_log_feature_flags:error(
-              "Feature flags: failed to mark feature flag `~s` as enabled=~p "
-              "on the following nodes:", [FeatureName, IsEnabled]),
-            [rabbit_log_feature_flags:error(
-               "Feature flags:   - ~s: ~p",
-               [Node, Ret])
-             || {Node, Ret} <- Rets,
-                Ret =/= ok],
-            Sleep = 1000,
-            T1 = erlang:timestamp(),
-            Duration = timer:now_diff(T1, T0),
-            NewTimeout = (Timeout * 1000 - Duration) div 1000 - Sleep,
-            if
-                NewTimeout > 0 ->
-                    rabbit_log_feature_flags:debug(
-                      "Feature flags:   retrying with a timeout of ~b "
-                      "ms after sleeping for ~b ms",
-                      [NewTimeout, Sleep]),
-                    timer:sleep(Sleep),
-                    mark_as_enabled_remotely(FailedNodes,
-                                             FeatureName,
-                                             IsEnabled,
-                                             NewTimeout);
-                true ->
-                    rabbit_log_feature_flags:debug(
-                      "Feature flags:   not retrying; RPC went over the "
-                      "~b milliseconds timeout", [Timeout]),
-                    %% FIXME: Is crashing the process the best solution here?
-                    throw(
-                      {failed_to_mark_feature_flag_as_enabled_on_remote_nodes,
-                       FeatureName, IsEnabled, FailedNodes})
-            end
-    end.
 
 %% -------------------------------------------------------------------
 %% Coordination with remote nodes.
@@ -2071,14 +1862,7 @@ push_local_feature_flags_from_apps_unknown_remotely(_, _, _) ->
     ok | {error, any()} | no_return().
 %% @private
 
-sync_feature_flags_with_cluster(Nodes, NodeIsVirgin) ->
-    sync_feature_flags_with_cluster(Nodes, NodeIsVirgin, ?TIMEOUT).
-
--spec sync_feature_flags_with_cluster([node()], boolean(), timeout()) ->
-    ok | {error, any()} | no_return().
-%% @private
-
-sync_feature_flags_with_cluster([], NodeIsVirgin, _) ->
+sync_feature_flags_with_cluster([], NodeIsVirgin) ->
     verify_which_feature_flags_are_actually_enabled(),
     case NodeIsVirgin of
         true ->
@@ -2120,63 +1904,9 @@ sync_feature_flags_with_cluster([], NodeIsVirgin, _) ->
               "current state"),
             ok
     end;
-sync_feature_flags_with_cluster(Nodes, _, Timeout) ->
+sync_feature_flags_with_cluster(_Nodes, _NodeIsVirgin) ->
     verify_which_feature_flags_are_actually_enabled(),
-    RemoteNodes = Nodes -- [node()],
-    sync_feature_flags_with_cluster1(RemoteNodes, Timeout).
-
-sync_feature_flags_with_cluster1([], _) ->
-    ok;
-sync_feature_flags_with_cluster1(RemoteNodes, Timeout) ->
-    RandomRemoteNode = pick_one_node(RemoteNodes),
-    rabbit_log_feature_flags:debug(
-      "Feature flags: SYNCING FEATURE FLAGS with node `~s`...",
-      [RandomRemoteNode]),
-    case query_remote_feature_flags(RandomRemoteNode, enabled, Timeout) of
-        {error, _} = Error ->
-            Error;
-        RemoteFeatureFlags ->
-            RemoteFeatureNames = maps:keys(RemoteFeatureFlags),
-            rabbit_log_feature_flags:debug(
-              "Feature flags: enabling locally feature flags already "
-              "enabled on node `~s`...",
-              [RandomRemoteNode]),
-            case do_sync_feature_flags_with_node(RemoteFeatureNames) of
-                ok ->
-                    sync_feature_flags_with_cluster2(
-                      RandomRemoteNode, Timeout);
-                Error ->
-                    Error
-            end
-    end.
-
-sync_feature_flags_with_cluster2(RandomRemoteNode, Timeout) ->
-    LocalFeatureNames = maps:keys(list(enabled)),
-    rabbit_log_feature_flags:debug(
-      "Feature flags: enabling on node `~s` feature flags already "
-      "enabled locally...",
-      [RandomRemoteNode]),
-    Ret = run_feature_flags_mod_on_remote_node(
-            RandomRemoteNode,
-            do_sync_feature_flags_with_node,
-            [LocalFeatureNames],
-            Timeout),
-    case Ret of
-        {error, pre_feature_flags_rabbitmq} -> ok;
-        _                                   -> Ret
-    end.
-
-pick_one_node(Nodes) ->
-    RandomIndex = rand:uniform(length(Nodes)),
-    lists:nth(RandomIndex, Nodes).
-
-do_sync_feature_flags_with_node([FeatureFlag | Rest]) ->
-    case enable_locally(FeatureFlag) of
-        ok    -> do_sync_feature_flags_with_node(Rest);
-        Error -> Error
-    end;
-do_sync_feature_flags_with_node([]) ->
-    ok.
+    rabbit_ff_controler:sync_cluster().
 
 -spec get_forced_feature_flag_names() -> [feature_name()] | undefined.
 %% @private
