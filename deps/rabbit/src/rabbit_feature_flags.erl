@@ -289,7 +289,7 @@ list(Which, Stability)
 %%   dependency tree are left unchanged).
 
 enable(FeatureNames) ->
-    rabbit_ff_controler:enable(FeatureNames).
+    rabbit_ff_controller:enable(FeatureNames).
 
 -spec enable_all() -> ok | {error, any()}.
 %% @doc
@@ -316,7 +316,7 @@ enable_all() ->
 %%   dependency tree are left unchanged).
 
 disable(FeatureNames) ->
-    rabbit_ff_controler:disable(FeatureNames).
+    rabbit_ff_controller:disable(FeatureNames).
 
 -spec disable_all() -> ok | {error, any()}.
 %% @doc
@@ -345,7 +345,7 @@ disable_all() ->
 %%   `false' if one of them is not or the RPC timed out.
 
 is_supported(FeatureNames) ->
-    rabbit_ff_controler:are_supported(FeatureNames).
+    rabbit_ff_controller:are_supported(FeatureNames).
 
 -spec is_supported(feature_name() | [feature_name()], timeout()) ->
     boolean().
@@ -363,7 +363,7 @@ is_supported(FeatureNames) ->
 %%   `false' if one of them is not or the RPC timed out.
 
 is_supported(FeatureNames, Timeout) ->
-    rabbit_ff_controler:are_supported(FeatureNames, Timeout).
+    rabbit_ff_controller:are_supported(FeatureNames, Timeout).
 
 -spec is_supported_locally(feature_name() | [feature_name()]) -> boolean().
 %% @doc
@@ -1906,7 +1906,7 @@ sync_feature_flags_with_cluster([], NodeIsVirgin) ->
     end;
 sync_feature_flags_with_cluster(_Nodes, _NodeIsVirgin) ->
     verify_which_feature_flags_are_actually_enabled(),
-    rabbit_ff_controler:sync_cluster().
+    rabbit_ff_controller:sync_cluster().
 
 -spec get_forced_feature_flag_names() -> [feature_name()] | undefined.
 %% @private

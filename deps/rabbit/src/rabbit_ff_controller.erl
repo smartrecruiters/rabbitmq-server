@@ -5,7 +5,7 @@
 %% Copyright (c) 2018-2021 VMware, Inc. or its affiliates.  All rights reserved.
 %%
 
--module(rabbit_ff_controler).
+-module(rabbit_ff_controller).
 -behaviour(gen_statem).
 
 -include_lib("kernel/include/logger.hrl").
@@ -31,7 +31,7 @@
          code_change/4,
 
          standing_by/3,
-         waiting_for_end_of_controler_task/3,
+         waiting_for_end_of_controller_task/3,
          updating_feature_flag_states/3]).
 
 -record(?MODULE, {from,
@@ -99,18 +99,18 @@ standing_by(
 
     %% The first step is to register this process globally (it is already
     %% registered locally). The purpose is to make sure this one takes full
-    %% control on feature flag changes among other controlers.
+    %% control on feature flag changes among other controllers.
     %%
     %% This is useful for situations where a new node joins the cluster while
     %% a feature flag is being enabled. In this case, when that new node joins
-    %% and its controler wants to synchronize feature flags, it will block and
-    %% wait for this one to finish.
+    %% and its controller wants to synchronize feature flags, it will block
+    %% and wait for this one to finish.
     case register_globally() of
         yes ->
             %% We would register the process globally. Therefore we can
             %% proceed with enabling/syncing feature flags.
             ?LOG_DEBUG(
-               "Feature flags: controler globally registered; can proceed "
+               "Feature flags: controller globally registered; can proceed "
                "with task",
                [],
                #{domain => ?RMQLOG_DOMAIN_FEAT_FLAGS}),
@@ -120,36 +120,36 @@ standing_by(
              [{next_event, internal, EventContent}]};
 
         no ->
-            %% Another controler is globally registered. We ask that global
-            %% controler to notify us when it is done, and we wait for its
+            %% Another controller is globally registered. We ask that global
+            %% controller to notify us when it is done, and we wait for its
             %% response.
             ?LOG_DEBUG(
-               "Feature flags: controler NOT globally registered; need to "
-               "wait for the current global controler's task to finish",
+               "Feature flags: controller NOT globally registered; need to "
+               "wait for the current global controller's task to finish",
                [],
                #{domain => ?RMQLOG_DOMAIN_FEAT_FLAGS}),
 
             RequestId = notify_me_when_done(),
-            {next_state, waiting_for_end_of_controler_task, RequestId,
+            {next_state, waiting_for_end_of_controller_task, RequestId,
              [{next_event, EventType, EventContent}]}
     end;
 standing_by(
   {call, From}, notify_when_done, none) ->
-    %% This state is entered when a globally-registered controler finished its
-    %% task but had unhandled `notify_when_done` requests in its inbox. We
+    %% This state is entered when a globally-registered controller finished
+    %% its task but had unhandled `notify_when_done` requests in its inbox. We
     %% just need to notify the caller that it can proceed.
-    notify_waiting_controler(From),
+    notify_waiting_controller(From),
     {keep_state_and_data, []}.
 
-waiting_for_end_of_controler_task(
+waiting_for_end_of_controller_task(
   {call, _From}, _EventContent, _RequestId) ->
     {keep_state_and_data, [postpone]};
-waiting_for_end_of_controler_task(
+waiting_for_end_of_controller_task(
   info, Msg, RequestId) ->
     case gen_statem:check_response(Msg, RequestId) of
         {reply, done} ->
             ?LOG_DEBUG(
-               "Feature flags: current global controler's task finished; "
+               "Feature flags: current global controller's task finished; "
                "trying to take next turn",
                [],
                #{domain => ?RMQLOG_DOMAIN_FEAT_FLAGS}),
@@ -157,14 +157,14 @@ waiting_for_end_of_controler_task(
         {error, Reason} ->
             ?LOG_DEBUG(
                "Feature flags: error while waiting for current global "
-               "controler's task: ~0p; trying to take next turn",
+               "controller's task: ~0p; trying to take next turn",
                [Reason],
                #{domain => ?RMQLOG_DOMAIN_FEAT_FLAGS}),
             {next_state, standing_by, none, []};
         no_reply ->
             ?LOG_DEBUG(
                "Feature flags: unknown message while waiting for current "
-               "global controler's task: ~0p; still waiting",
+               "global controller's task: ~0p; still waiting",
                [Msg],
                #{domain => ?RMQLOG_DOMAIN_FEAT_FLAGS}),
             keep_state_and_data
@@ -174,7 +174,7 @@ updating_feature_flag_states(
   internal, Task, #?MODULE{from = From} = Data) ->
     Reply = proceed_with_task(Task),
     unregister_globally(),
-    notify_waiting_controlers(Data),
+    notify_waiting_controllers(Data),
     {next_state, standing_by, none, [{reply, From, Reply}]};
 updating_feature_flag_states(
   {call, From}, notify_when_done, #?MODULE{notify = Notify} = Data) ->
@@ -200,7 +200,7 @@ proceed_with_task({enable, FeatureNames}) ->
     DisabledFeatureNames = [FeatureName
                             || FeatureName <- FeatureNames,
                                %% This check can't block because only one
-                               %% controler can modify feature flag states at
+                               %% controller can modify feature flag states at
                                %% a time.
                                not rabbit_feature_flags:is_enabled(FeatureName)
                            ],
@@ -381,17 +381,17 @@ unregister_globally() ->
 notify_me_when_done() ->
     gen_statem:send_request({global, ?GLOBAL_NAME}, notify_when_done).
 
-notify_waiting_controlers(#?MODULE{notify = Notify}) ->
+notify_waiting_controllers(#?MODULE{notify = Notify}) ->
     maps:fold(
       fun(From, true, Acc) ->
-              notify_waiting_controler(From),
+              notify_waiting_controller(From),
               Acc
       end, ok, Notify).
 
-notify_waiting_controler({ControlerPid, _} = From) ->
+notify_waiting_controller({ControlerPid, _} = From) ->
     ControlerNode = node(ControlerPid),
     ?LOG_DEBUG(
-       "Feature flags: controler's task finished; notify waiting controler "
+       "Feature flags: controller's task finished; notify waiting controller "
        "on node ~p",
        [ControlerNode],
        #{domain => ?RMQLOG_DOMAIN_FEAT_FLAGS}),

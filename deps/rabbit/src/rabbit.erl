@@ -114,10 +114,10 @@
                     {requires,    external_infrastructure},
                     {enables,     kernel_ready}]}).
 
--rabbit_boot_step({rabbit_ff_controler,
-                   [{description, "feature flags controler"},
+-rabbit_boot_step({rabbit_ff_controller,
+                   [{description, "feature flags controller"},
                     {mfa,         {rabbit_sup, start_child,
-                                   [rabbit_ff_controler]}},
+                                   [rabbit_ff_controller]}},
                     {requires,    pre_boot},
                     {enables,     external_infrastructure}]}).
 
