@@ -68,6 +68,13 @@
                     {requires,    pre_boot},
                     {enables,     external_infrastructure}]}).
 
+-rabbit_boot_step({rabbit_ff_controller,
+                   [{description, "feature flags controller"},
+                    {mfa,         {rabbit_sup, start_child,
+                                   [rabbit_ff_controller]}},
+                    {requires,    feature_flags},
+                    {enables,     external_infrastructure}]}).
+
 -rabbit_boot_step({database,
                    [{mfa,         {rabbit_mnesia, init, []}},
                     {requires,    file_handle_cache},
@@ -113,13 +120,6 @@
                                    [rabbit_registry]}},
                     {requires,    external_infrastructure},
                     {enables,     kernel_ready}]}).
-
--rabbit_boot_step({rabbit_ff_controller,
-                   [{description, "feature flags controller"},
-                    {mfa,         {rabbit_sup, start_child,
-                                   [rabbit_ff_controller]}},
-                    {requires,    pre_boot},
-                    {enables,     external_infrastructure}]}).
 
 -rabbit_boot_step({rabbit_core_metrics,
                    [{description, "core metrics storage"},

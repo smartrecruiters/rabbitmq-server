@@ -300,6 +300,20 @@ list(Which, Stability)
 %%   dependency tree are left unchanged).
 
 enable(FeatureName) when is_atom(FeatureName) ->
+    case is_enabled(feature_flags_v2) of
+        true  -> rabbit_ff_controller:enable(FeatureName);
+        false -> enable_v1(FeatureName)
+    end;
+enable(FeatureNames) when is_list(FeatureNames) ->
+    FeatureNames1 = lists:sort(
+                      fun
+                          (feature_flags_v2, _) -> true;
+                          (_, feature_flags_v2) -> false;
+                          (A, B)                -> A =< B
+                      end, FeatureNames),
+    with_feature_flags(FeatureNames1, fun enable/1).
+
+enable_v1(FeatureName) ->
     rabbit_log_feature_flags:debug(
       "Feature flag `~s`: REQUEST TO ENABLE",
       [FeatureName]),
@@ -327,9 +341,7 @@ enable(FeatureName) when is_atom(FeatureName) ->
                       [FeatureName]),
                     {error, unsupported}
             end
-    end;
-enable(FeatureNames) when is_list(FeatureNames) ->
-    with_feature_flags(FeatureNames, fun enable/1).
+    end.
 
 -spec enable_all() -> ok | {error, any()}.
 %% @doc
@@ -341,7 +353,7 @@ enable(FeatureNames) when is_list(FeatureNames) ->
 %%   unchanged).
 
 enable_all() ->
-    with_feature_flags(maps:keys(list(all)), fun enable/1).
+    enable(maps:keys(list(all))).
 
 -spec disable(feature_name() | [feature_name()]) -> ok | {error, any()}.
 %% @doc
@@ -1861,6 +1873,12 @@ check_node_compatibility(Node) ->
 %% @see check_node_compatibility/1
 
 check_node_compatibility(Node, Timeout) ->
+    case is_enabled(feature_flags_v2) of
+        true  -> rabbit_ff_controller:check_node_compatibility(Node);
+        false -> check_node_compatibility_v1(Node, Timeout)
+    end.
+
+check_node_compatibility_v1(Node, Timeout) ->
     %% Before checking compatibility, we exchange feature flags from
     %% unknown Erlang applications. So we fetch remote feature flags
     %% from applications which are not loaded locally, and the opposite.
@@ -1961,42 +1979,8 @@ remote_enabled_feature_flags_is_supported_locally(Node, Timeout) ->
             is_supported_locally(RemoteEnabledFeatureNames)
     end.
 
--spec run_feature_flags_mod_on_remote_node(node(),
-                                           atom(),
-                                           [term()],
-                                           timeout()) ->
-    term() | {error, term()}.
-%% @private
-
 run_feature_flags_mod_on_remote_node(Node, Function, Args, Timeout) ->
-    case rpc:call(Node, ?MODULE, Function, Args, Timeout) of
-        {badrpc, {'EXIT',
-                  {undef,
-                   [{?MODULE, Function, Args, []}
-                    | _]}}} ->
-            %% If rabbit_feature_flags:Function() is undefined
-            %% on the remote node, we consider it to be a 3.7.x
-            %% pre-feature-flags node.
-            %%
-            %% Theoretically, it could be an older version (3.6.x and
-            %% older). But the RabbitMQ version consistency check
-            %% (rabbit_misc:version_minor_equivalent/2) called from
-            %% rabbit_mnesia:check_rabbit_consistency/2 already blocked
-            %% this situation from happening before we reach this point.
-            rabbit_log_feature_flags:debug(
-              "Feature flags: ~s:~s~p unavailable on node `~s`: "
-              "assuming it is a RabbitMQ 3.7.x pre-feature-flags node",
-              [?MODULE, Function, Args, Node]),
-            {error, pre_feature_flags_rabbitmq};
-        {badrpc, Reason} = Error ->
-            rabbit_log_feature_flags:error(
-              "Feature flags: error while running ~s:~s~p "
-              "on node `~s`: ~p",
-              [?MODULE, Function, Args, Node, Reason]),
-            {error, Error};
-        Ret ->
-            Ret
-    end.
+    rabbit_ff_controller:rpc_call(Node, ?MODULE, Function, Args, Timeout).
 
 -spec query_remote_feature_flags(node(),
                                  Which :: all | enabled | disabled,
@@ -2117,7 +2101,13 @@ sync_feature_flags_with_cluster(Nodes, NodeIsVirgin) ->
     ok | {error, any()} | no_return().
 %% @private
 
-sync_feature_flags_with_cluster([], NodeIsVirgin, _) ->
+sync_feature_flags_with_cluster(Nodes, NodeIsVirgin, Timeout) ->
+    case is_enabled(feature_flags_v2) of
+        true  -> rabbit_ff_controller:sync_cluster();
+        false -> sync_cluster_v1(Nodes, NodeIsVirgin, Timeout)
+    end.
+
+sync_cluster_v1([], NodeIsVirgin, _) ->
     verify_which_feature_flags_are_actually_enabled(),
     case NodeIsVirgin of
         true ->
@@ -2159,7 +2149,7 @@ sync_feature_flags_with_cluster([], NodeIsVirgin, _) ->
               "current state"),
             ok
     end;
-sync_feature_flags_with_cluster(Nodes, _, Timeout) ->
+sync_cluster_v1(Nodes, _, Timeout) ->
     verify_which_feature_flags_are_actually_enabled(),
     RemoteNodes = Nodes -- [node()],
     sync_feature_flags_with_cluster1(RemoteNodes, Timeout).
@@ -2370,6 +2360,7 @@ verify_which_feature_flags_are_actually_enabled() ->
 refresh_feature_flags_after_app_load([]) ->
     ok;
 refresh_feature_flags_after_app_load(Apps) ->
+    %% TODO: feature_flags_v2 version.
     rabbit_log_feature_flags:debug(
       "Feature flags: new apps loaded: ~p -> refreshing feature flags",
       [Apps]),

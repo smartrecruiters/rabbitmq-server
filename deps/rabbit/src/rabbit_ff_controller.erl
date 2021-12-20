@@ -14,10 +14,13 @@
 
 -export([enable/1,
          disable/1,
+         check_node_compatibility/1,
          sync_cluster/0]).
 
 %% Internal use only.
 -export([start_link/0,
+         rpc_call/5,
+         running_nodes/0,
          run_migration_fun_locally/2]).
 
 %% gen_statem callbacks.
@@ -57,6 +60,15 @@ disable(FeatureName) when is_atom(FeatureName) ->
     disable([FeatureName]);
 disable(FeatureNames) when is_list(FeatureNames) ->
     {error, unsupported}.
+
+check_node_compatibility(RemoteNode) ->
+    ?LOG_DEBUG(
+       "Feature flags: CHECKING COMPATIBILITY with remote node ~p",
+       [RemoteNode],
+       #{domain => ?RMQLOG_DOMAIN_FEAT_FLAGS}),
+    ThisNode = node(),
+    gen_statem:call(
+      ?LOCAL_NAME, {check_node_compatibility, ThisNode, RemoteNode}).
 
 sync_cluster() ->
     ?LOG_DEBUG(
@@ -178,6 +190,13 @@ updating_feature_flag_states(
     Data1 = Data#?MODULE{notify = Notify1},
     {keep_state, Data1}.
 
+proceed_with_task({enable, FeatureNames}) ->
+    enable_task(FeatureNames);
+proceed_with_task({check_node_compatibility, NodeA, NodeB}) ->
+    check_node_compatibility_task(NodeA, NodeB);
+proceed_with_task(sync_cluster) ->
+    sync_cluster_task().
+
 terminate(_Reason, _State, _Data) ->
     ok.
 
@@ -185,13 +204,42 @@ code_change(_OldVsn, OldState, OldData, _Extra) ->
     {ok, OldState, OldData}.
 
 %% --------------------------------------------------------------------
-%% Code to enable and sync feature flags.
+%% Code to check compatibility between nodes.
 %% --------------------------------------------------------------------
 
-proceed_with_task({enable, FeatureNames}) ->
-    enable_task(FeatureNames);
-proceed_with_task(sync_cluster) ->
-    sync_cluster_task().
+check_node_compatibility_task(NodeA, NodeB) ->
+    NodesA = rpc_call(NodeA, ?MODULE, running_nodes, [], ?TIMEOUT),
+    NodesB = rpc_call(NodeB, ?MODULE, running_nodes, [], ?TIMEOUT),
+    case collect_inventory_on_nodes(NodesA) of
+        {ok, InventoryA} ->
+            case collect_inventory_on_nodes(NodesB) of
+                {ok, InventoryB} ->
+                    check_one_way_compatibility(InventoryA, InventoryB)
+                    andalso
+                    check_one_way_compatibility(InventoryB, InventoryA);
+                _ ->
+                    false
+            end;
+        _ ->
+            false
+    end.
+
+check_one_way_compatibility(InventoryA, InventoryB) ->
+    %% This function checks the compatibility in one way, "inventory A" is
+    %% compatible with "inventory B". This is true if all feature flags
+    %% enabled in "inventory B" are supported by "inventory A".
+    %%
+    %% They don't need to be enabled on both side: the feature flags states
+    %% will be synchronized by `sync_cluster()'.
+    FeatureNames = list_feature_flags_enabled_somewhere(InventoryB),
+    lists:all(
+      fun(FeatureName) ->
+              is_supported(InventoryA, FeatureName)
+      end, FeatureNames).
+
+%% --------------------------------------------------------------------
+%% Code to enable and sync feature flags.
+%% --------------------------------------------------------------------
 
 enable_task(FeatureNames) ->
     %% We take a snapshot of clustered running nodes at the beginning of the
@@ -480,6 +528,15 @@ list_nodes_where_feature_flag_is_disabled(
                       _ -> false
                   end
           end, StatesPerNode))).
+
+-spec rpc_call(Node, Module, Function, Args, Timeout) -> Ret when
+      Node :: node(),
+      Module :: module(),
+      Function :: atom(),
+      Args :: [term()],
+      Timeout :: timeout(),
+      Ret :: term() | {error, term()}.
+%% @private
 
 rpc_call(Node, Module, Function, Args, Timeout) ->
     case rpc:call(Node, Module, Function, Args, Timeout) of

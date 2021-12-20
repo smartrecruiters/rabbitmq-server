@@ -60,6 +60,12 @@
        migration_fun => {?MODULE, user_limits_migration}
      }}).
 
+-rabbit_feature_flag(
+    {feature_flags_v2,
+     #{desc          => "Feature flags subsystem V2",
+       stability     => stable
+     }}).
+
 %% -------------------------------------------------------------------
 %% Quorum queues.
 %% -------------------------------------------------------------------
