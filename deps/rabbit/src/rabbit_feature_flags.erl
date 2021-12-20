@@ -229,6 +229,10 @@
 
 -type registry_vsn() :: term().
 
+-type inventory() :: #{applications := [atom()],
+                       feature_flags := feature_flags(),
+                       states := feature_states()}.
+
 -export_type([feature_flag_modattr/0,
               feature_props/0,
               feature_name/0,
@@ -239,7 +243,8 @@
               stability/0,
               migration_fun_name/0,
               migration_fun/0,
-              migration_fun_context/0]).
+              migration_fun_context/0,
+              inventory/0]).
 
 -on_load(on_load/0).
 
@@ -861,7 +866,7 @@ maybe_initialize_registry(NewSupportedFeatureFlags,
     %% supported feature flags. That list comes from the
     %% `-rabbitmq_feature_flag().` module attributes exposed by all
     %% currently loaded Erlang modules.
-    KnownFeatureFlags2 = query_supported_feature_flags(),
+    {ScannedApps, KnownFeatureFlags2} = query_supported_feature_flags(),
 
     %% We merge the feature flags we already knew about
     %% (KnownFeatureFlags1), those found in the loaded applications
@@ -896,6 +901,18 @@ maybe_initialize_registry(NewSupportedFeatureFlags,
                          (_, false) -> false
                       end, FeatureStates0),
 
+    %% The feature flags inventory is used by rabbit_ff_controller to query
+    %% feature flags atomically. The inventory also contains the list of
+    %% scanner applications: this is used to determine if an application is
+    %% known by this node or not, and decide if a missing feature flag is
+    %% unknown or unsupported.
+    Inventory = #{applications => lists:sort(ScannedApps),
+                  feature_flags => KnownFeatureFlags2,
+                  states => FeatureStates},
+    rabbit_log_feature_flags:debug(
+      "Feature flags: inventory = ~p",
+      [Inventory]),
+
     Proceed = does_registry_need_refresh(AllFeatureFlags,
                                          FeatureStates,
                                          WrittenToDisk),
@@ -909,6 +926,7 @@ maybe_initialize_registry(NewSupportedFeatureFlags,
             Ret = do_initialize_registry(RegistryVsn,
                                          AllFeatureFlags,
                                          FeatureStates,
+                                         Inventory,
                                          WrittenToDisk),
             T1 = erlang:timestamp(),
             rabbit_log_feature_flags:debug(
@@ -970,6 +988,7 @@ does_registry_need_refresh(AllFeatureFlags,
 -spec do_initialize_registry(registry_vsn(),
                              feature_flags(),
                              feature_states(),
+                             inventory(),
                              boolean()) ->
     ok | restart | {error, any()} | no_return().
 %% @private
@@ -977,6 +996,7 @@ does_registry_need_refresh(AllFeatureFlags,
 do_initialize_registry(RegistryVsn,
                        AllFeatureFlags,
                        FeatureStates,
+                       Inventory,
                        WrittenToDisk) ->
     %% We log the state of those feature flags.
     rabbit_log_feature_flags:info(
@@ -1008,9 +1028,12 @@ do_initialize_registry(RegistryVsn,
     regen_registry_mod(RegistryVsn,
                        AllFeatureFlags,
                        FeatureStates,
+                       Inventory,
                        WrittenToDisk).
 
--spec query_supported_feature_flags() -> feature_flags().
+-spec query_supported_feature_flags() -> {ScannedApps, FeatureFlags} when
+      ScannedApps :: [atom()],
+      FeatureFlags :: feature_flags().
 %% @private
 
 -ifdef(TEST).
@@ -1031,27 +1054,29 @@ query_supported_feature_flags() ->
       "Feature flags: query feature flags in loaded applications "
       "+ testsuite"),
     T0 = erlang:timestamp(),
-    AttributesPerApp = rabbit_misc:rabbitmq_related_module_attributes(
-                         rabbit_feature_flag),
+    ScannedApps = rabbit_misc:rabbitmq_related_apps(),
+    AttributesPerApp = rabbit_misc:module_attributes_from_apps(
+                         rabbit_feature_flag, ScannedApps),
     AttributesFromTestsuite = module_attributes_from_testsuite(),
     T1 = erlang:timestamp(),
     rabbit_log_feature_flags:debug(
       "Feature flags: time to find supported feature flags: ~p µs",
       [timer:now_diff(T1, T0)]),
     AllAttributes = AttributesPerApp ++ AttributesFromTestsuite,
-    prepare_queried_feature_flags(AllAttributes, #{}).
+    {ScannedApps, prepare_queried_feature_flags(AllAttributes, #{})}.
 -else.
 query_supported_feature_flags() ->
     rabbit_log_feature_flags:debug(
       "Feature flags: query feature flags in loaded applications"),
     T0 = erlang:timestamp(),
-    AttributesPerApp = rabbit_misc:rabbitmq_related_module_attributes(
-                         rabbit_feature_flag),
+    ScannedApps = rabbit_misc:rabbitmq_related_apps(),
+    AttributesPerApp = rabbit_misc:module_attributes_from_apps(
+                         rabbit_feature_flag, ScannedApps),
     T1 = erlang:timestamp(),
     rabbit_log_feature_flags:debug(
       "Feature flags: time to find supported feature flags: ~p µs",
       [timer:now_diff(T1, T0)]),
-    prepare_queried_feature_flags(AttributesPerApp, #{}).
+    {ScannedApps, prepare_queried_feature_flags(AttributesPerApp, #{})}.
 -endif.
 
 prepare_queried_feature_flags([{App, _Module, Attributes} | Rest],
@@ -1089,6 +1114,7 @@ merge_new_feature_flags(AllFeatureFlags, App, FeatureName, FeatureProps)
 -spec regen_registry_mod(registry_vsn(),
                          feature_flags(),
                          feature_states(),
+                         inventory(),
                          boolean()) ->
     ok | restart | {error, any()} | no_return().
 %% @private
@@ -1096,6 +1122,7 @@ merge_new_feature_flags(AllFeatureFlags, App, FeatureName, FeatureProps)
 regen_registry_mod(RegistryVsn,
                    AllFeatureFlags,
                    FeatureStates,
+                   Inventory,
                    WrittenToDisk) ->
     %% Here, we recreate the source code of the `rabbit_ff_registry`
     %% module from scratch.
@@ -1122,7 +1149,8 @@ regen_registry_mod(RegistryVsn,
                                      {is_supported, 1},
                                      {is_enabled, 1},
                                      {is_registry_initialized, 0},
-                                     {is_registry_written_to_disk, 0}]]
+                                     {is_registry_written_to_disk, 0},
+                                     {inventory, 0}]]
                      )
                    ]
                   ),
@@ -1256,6 +1284,16 @@ regen_registry_mod(RegistryVsn,
                            erl_syntax:atom(is_registry_written_to_disk),
                            IsWrittenToDiskClauses),
     IsWrittenToDiskFunForm = erl_syntax:revert(IsWrittenToDiskFun),
+    %% inventory() -> ...
+    InventoryBody = erl_syntax:abstract(Inventory),
+    InventoryClauses = [erl_syntax:clause([],
+                                          [],
+                                          [InventoryBody])
+                       ],
+    InventoryFun = erl_syntax:function(
+                     erl_syntax:atom(inventory),
+                     InventoryClauses),
+    InventoryFunForm = erl_syntax:revert(InventoryFun),
     %% Compilation!
     Forms = [ModuleForm,
              ExportForm,
@@ -1265,7 +1303,8 @@ regen_registry_mod(RegistryVsn,
              IsSupportedFunForm,
              IsEnabledFunForm,
              IsInitializedFunForm,
-             IsWrittenToDiskFunForm],
+             IsWrittenToDiskFunForm,
+             InventoryFunForm],
     maybe_log_registry_source_code(Forms),
     CompileOpts = [return_errors,
                    return_warnings],
@@ -2336,7 +2375,7 @@ refresh_feature_flags_after_app_load(Apps) ->
       [Apps]),
 
     FeatureFlags0 = list(all),
-    FeatureFlags1 = query_supported_feature_flags(),
+    {_ScannedApps, FeatureFlags1} = query_supported_feature_flags(),
 
     %% The following list contains all the feature flags this node
     %% learned about only because remote nodes have them. Now, the

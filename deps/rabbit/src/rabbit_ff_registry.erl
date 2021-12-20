@@ -26,7 +26,8 @@
          is_supported/1,
          is_enabled/1,
          is_registry_initialized/0,
-         is_registry_written_to_disk/0]).
+         is_registry_written_to_disk/0,
+         inventory/0]).
 
 -ifdef(TEST).
 -on_load(on_load/0).
@@ -157,6 +158,13 @@ is_registry_initialized() ->
 
 is_registry_written_to_disk() ->
     always_return_true().
+
+-spec inventory() -> rabbit_feature_flags:inventory().
+
+inventory() ->
+    #{applications => [],
+      feature_flags => #{},
+      states => #{}}.
 
 always_return_true() ->
     %% This function is here to trick Dialyzer. We want some functions
