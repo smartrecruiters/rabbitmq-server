@@ -9,6 +9,7 @@
 -behaviour(gen_statem).
 
 -include_lib("kernel/include/logger.hrl").
+-include_lib("stdlib/include/assert.hrl").
 
 -include_lib("rabbit_common/include/logging.hrl").
 
@@ -63,20 +64,37 @@ disable(FeatureNames) when is_list(FeatureNames) ->
     {error, unsupported}.
 
 check_node_compatibility(RemoteNode) ->
-    ?LOG_DEBUG(
-       "Feature flags: CHECKING COMPATIBILITY with remote node ~p",
-       [RemoteNode],
-       #{domain => ?RMQLOG_DOMAIN_FEAT_FLAGS}),
     ThisNode = node(),
-    gen_statem:call(
-      ?LOCAL_NAME, {check_node_compatibility, ThisNode, RemoteNode}).
+    ?LOG_DEBUG(
+       "Feature flags: CHECKING COMPATIBILITY between nodes `~s` and `~s`",
+       [ThisNode, RemoteNode],
+       #{domain => ?RMQLOG_DOMAIN_FEAT_FLAGS}),
+    %% We don't go through the controller process to check nodes compatibility
+    %% because this function is used while `rabbit' is stopped usually.
+    %%
+    %% There is no benefit in starting a controller just for this check
+    %% because it would not guaranty that the compatibility remains true after
+    %% this function and before the node starts and synchronize feature flags.
+    check_node_compatibility_task(ThisNode, RemoteNode).
 
 sync_cluster() ->
     ?LOG_DEBUG(
        "Feature flags: SYNCING FEATURE FLAGS in cluster...",
        [],
        #{domain => ?RMQLOG_DOMAIN_FEAT_FLAGS}),
-    gen_statem:call(?LOCAL_NAME, sync_cluster).
+    case erlang:whereis(?LOCAL_NAME) of
+        Pid when is_pid(Pid) ->
+            %% The function is called while `rabbit' is running.
+            gen_statem:call(?LOCAL_NAME, sync_cluster);
+        undefined ->
+            %% The function is called while `rabbit' is stopped. We need to
+            %% start a one-off controller, again to make sure concurrent
+            %% changes are blocked.
+            {ok, Pid} = start_link(),
+            Ret = gen_statem:call(Pid, sync_cluster),
+            gen_statem:stop(Pid),
+            Ret
+    end.
 
 refresh_after_app_load() ->
     ?LOG_DEBUG(
@@ -196,8 +214,6 @@ updating_feature_flag_states(
 
 proceed_with_task({enable, FeatureNames}) ->
     enable_task(FeatureNames);
-proceed_with_task({check_node_compatibility, NodeA, NodeB}) ->
-    check_node_compatibility_task(NodeA, NodeB);
 proceed_with_task(sync_cluster) ->
     sync_cluster_task();
 proceed_with_task(refresh_after_app_load) ->
@@ -214,21 +230,59 @@ code_change(_OldVsn, OldState, OldData, _Extra) ->
 %% --------------------------------------------------------------------
 
 check_node_compatibility_task(NodeA, NodeB) ->
-    NodesA = rpc_call(NodeA, ?MODULE, running_nodes, [], ?TIMEOUT),
-    NodesB = rpc_call(NodeB, ?MODULE, running_nodes, [], ?TIMEOUT),
-    case collect_inventory_on_nodes(NodesA) of
-        {ok, InventoryA} ->
-            case collect_inventory_on_nodes(NodesB) of
-                {ok, InventoryB} ->
-                    check_one_way_compatibility(InventoryA, InventoryB)
-                    andalso
-                    check_one_way_compatibility(InventoryB, InventoryA);
-                _ ->
-                    false
-            end;
-        _ ->
-            false
+    ?LOG_NOTICE(
+       "Feature flags: checking nodes `~s` and `~s` compatibility...",
+       [NodeA, NodeB],
+       #{domain => ?RMQLOG_DOMAIN_FEAT_FLAGS}),
+    NodesA = list_nodes_clustered_with(NodeA),
+    NodesB = list_nodes_clustered_with(NodeB),
+    AreCompatible = case collect_inventory_on_nodes(NodesA) of
+                        {ok, InventoryA} ->
+                            ?LOG_DEBUG(
+                               "Feature flags: inventory of node `~s`:~n~p",
+                               [NodeA, InventoryA],
+                               #{domain => ?RMQLOG_DOMAIN_FEAT_FLAGS}),
+                            case collect_inventory_on_nodes(NodesB) of
+                                {ok, InventoryB} ->
+                                    ?LOG_DEBUG(
+                                       "Feature flags: inventory of node "
+                                       "`~s`:~n~p",
+                                       [NodeB, InventoryB],
+                                       #{domain => ?RMQLOG_DOMAIN_FEAT_FLAGS}),
+                                    are_compatible(InventoryA, InventoryB);
+                                _ ->
+                                    false
+                            end;
+                        _ ->
+                            false
+                    end,
+    case AreCompatible of
+        true ->
+            ?LOG_NOTICE(
+               "Feature flags: nodes `~s` and `~s` are compatible",
+               [NodeA, NodeB],
+               #{domain => ?RMQLOG_DOMAIN_FEAT_FLAGS}),
+            ok;
+        false ->
+            ?LOG_WARNING(
+               "Feature flags: nodes `~s` and `~s` are incompatible",
+               [NodeA, NodeB],
+               #{domain => ?RMQLOG_DOMAIN_FEAT_FLAGS}),
+            {error, incompatible_feature_flags}
     end.
+
+list_nodes_clustered_with(Node) ->
+    %% If Mnesia is stopped on the given node, it will return an empty list.
+    %% In this case, only consider that stopped node.
+    case rpc_call(Node, ?MODULE, running_nodes, [], ?TIMEOUT) of
+        []   -> [Node];
+        List -> List
+    end.
+
+are_compatible(InventoryA, InventoryB) ->
+    check_one_way_compatibility(InventoryA, InventoryB)
+    andalso
+    check_one_way_compatibility(InventoryB, InventoryA).
 
 check_one_way_compatibility(InventoryA, InventoryB) ->
     %% This function checks the compatibility in one way, "inventory A" is
@@ -269,6 +323,7 @@ enable_task(FeatureNames) ->
        "between will synchronize their feature flag states later.",
        [Nodes],
        #{domain => ?RMQLOG_DOMAIN_FEAT_FLAGS}),
+    ?assertNotEqual([], Nodes),
 
     %% Likewise, we take a snapshot of the feature flags states on all running
     %% nodes right from the beginning. This is what we use during the entire
@@ -293,6 +348,7 @@ sync_cluster_task() ->
        "Feature flags: synchronizing feature flags on nodes: ~p",
        [Nodes],
        #{domain => ?RMQLOG_DOMAIN_FEAT_FLAGS}),
+    ?assertNotEqual([], Nodes),
 
     case collect_inventory_on_nodes(Nodes) of
         {ok, Inventory} ->
@@ -320,7 +376,7 @@ enable_if_supported(Inventory, FeatureName) ->
     case is_supported(Inventory, FeatureName) of
         true ->
             ?LOG_DEBUG(
-               "Feature flags: `~s`: supported; continueing",
+               "Feature flags: `~s`: supported; continuing",
                [FeatureName],
                #{domain => ?RMQLOG_DOMAIN_FEAT_FLAGS}),
             case lock_registry_and_enable(Inventory, FeatureName) of
@@ -433,11 +489,16 @@ do_enable(Inventory, FeatureName) ->
             %% executed.
             Nodes = list_nodes_where_feature_flag_is_disabled(
                       Inventory1, FeatureName),
+            ?LOG_DEBUG(
+               "Feature flags: `~s`: run migration function with arg=~p on "
+               "nodes: ~p",
+               [FeatureName, enable, Nodes],
+               #{domain => ?RMQLOG_DOMAIN_FEAT_FLAGS}),
             Ret = run_migration_fun(Nodes, FeatureName, enable, infinity),
+            ?assertNotEqual({error, no_migration_fun}, Ret),
             case Ret of
-                ok                        -> {ok, Inventory1};
-                {error, no_migration_fun} -> {ok, Inventory1};
-                Error                     -> Error
+                ok    -> {ok, Inventory1};
+                Error -> Error
             end;
         Error ->
             Error
@@ -478,7 +539,7 @@ notify_waiting_controller({ControlerPid, _} = From) ->
 %% --------------------------------------------------------------------
 
 running_nodes() ->
-    lists:sort(mnesia:system_info(running_db_nodes)).
+    lists:usort([node() | mnesia:system_info(running_db_nodes)]).
 
 collect_inventory_on_nodes(Nodes) ->
     ?LOG_DEBUG(
@@ -721,8 +782,12 @@ run_migration_fun([Node | Rest], FeatureName, Arg, Timeout) ->
        [FeatureName, Arg, Node],
        #{domain => ?RMQLOG_DOMAIN_FEAT_FLAGS}),
     case run_migration_fun_on_node(Node, FeatureName, Arg, Timeout) of
-        ok    -> run_migration_fun(Rest, FeatureName, Arg, Timeout);
-        Error -> Error
+        {error, no_migration_fun} ->
+            run_migration_fun(Rest, FeatureName, Arg, Timeout);
+        {error, _Reason} = Error ->
+            Error;
+        _ ->
+            run_migration_fun(Rest, FeatureName, Arg, Timeout)
     end;
 run_migration_fun([], _FeatureName, _Arg, _Timeout) ->
     ok.

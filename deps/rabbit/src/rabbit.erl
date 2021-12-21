@@ -68,13 +68,6 @@
                     {requires,    pre_boot},
                     {enables,     external_infrastructure}]}).
 
-% XXX -rabbit_boot_step({rabbit_ff_controller,
-% XXX                    [{description, "feature flags controller"},
-% XXX                     {mfa,         {rabbit_sup, start_child,
-% XXX                                    [rabbit_ff_controller]}},
-% XXX                     {requires,    feature_flags},
-% XXX                     {enables,     external_infrastructure}]}).
-
 -rabbit_boot_step({database,
                    [{mfa,         {rabbit_mnesia, init, []}},
                     {requires,    file_handle_cache},
@@ -876,7 +869,10 @@ start(normal, []) ->
         log_motd(),
         {ok, SupPid} = rabbit_sup:start_link(),
 
-        %% XXX
+        %% When we load plugins later in this function, we refresh feature
+        %% flags. If `feature_flags_v2' is enabled, `rabbit_ff_controller'
+        %% will be used. We start it now because we can't wait for boot steps
+        %% to do this (feature flags are refreshed before boot steps run).
         ok = rabbit_sup:start_child(rabbit_ff_controller),
 
         %% Compatibility with older RabbitMQ versions + required by
