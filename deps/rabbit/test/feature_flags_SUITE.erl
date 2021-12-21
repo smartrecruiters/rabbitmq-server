@@ -286,7 +286,8 @@ registry_general_usage(_Config) ->
     ?assertNot(rabbit_ff_registry:is_supported(ff_c)),
     ?assertNot(rabbit_ff_registry:is_supported(ff_d)),
 
-    ?assertEqual(erlang:map_size(rabbit_ff_registry:states()), 0),
+    ?assertEqual(#{ff_a => false,
+                   ff_b => false}, rabbit_ff_registry:states()),
     ?assertMatch([], ?list_ff(enabled)),
     ?assertMatch([], ?list_ff(state_changing)),
     ?assertMatch([ff_a, ff_b], ?list_ff(disabled)),
@@ -310,7 +311,9 @@ registry_general_usage(_Config) ->
     ?assert(rabbit_ff_registry:is_supported(ff_c)),
     ?assertNot(rabbit_ff_registry:is_supported(ff_d)),
 
-    ?assertEqual(erlang:map_size(rabbit_ff_registry:states()), 0),
+    ?assertEqual(#{ff_a => false,
+                   ff_b => false,
+                   ff_c => false}, rabbit_ff_registry:states()),
     ?assertMatch([], ?list_ff(enabled)),
     ?assertMatch([], ?list_ff(state_changing)),
     ?assertMatch([ff_a, ff_b, ff_c], ?list_ff(disabled)),
@@ -332,7 +335,9 @@ registry_general_usage(_Config) ->
     ?assert(rabbit_ff_registry:is_supported(ff_c)),
     ?assertNot(rabbit_ff_registry:is_supported(ff_d)),
 
-    ?assertMatch(#{ff_a := true}, rabbit_ff_registry:states()),
+    ?assertEqual(#{ff_a => true,
+                   ff_b => false,
+                   ff_c => false}, rabbit_ff_registry:states()),
     ?assertMatch([ff_a], ?list_ff(enabled)),
     ?assertMatch([], ?list_ff(state_changing)),
     ?assertMatch([ff_b, ff_c], ?list_ff(disabled)),
@@ -355,7 +360,9 @@ registry_general_usage(_Config) ->
     ?assert(rabbit_ff_registry:is_supported(ff_c)),
     ?assertNot(rabbit_ff_registry:is_supported(ff_d)),
 
-    ?assertMatch(#{ff_c := state_changing}, rabbit_ff_registry:states()),
+    ?assertEqual(#{ff_a => false,
+                   ff_b => false,
+                   ff_c => state_changing}, rabbit_ff_registry:states()),
     ?assertMatch([], ?list_ff(enabled)),
     ?assertMatch([ff_c], ?list_ff(state_changing)),
     ?assertMatch([ff_a, ff_b], ?list_ff(disabled)),
@@ -378,7 +385,9 @@ registry_general_usage(_Config) ->
     ?assert(rabbit_ff_registry:is_supported(ff_c)),
     ?assertNot(rabbit_ff_registry:is_supported(ff_d)),
 
-    ?assertEqual(erlang:map_size(rabbit_ff_registry:states()), 0),
+    ?assertEqual(#{ff_a => false,
+                   ff_b => false,
+                   ff_c => false}, rabbit_ff_registry:states()),
     ?assertMatch([], ?list_ff(enabled)),
     ?assertMatch([], ?list_ff(state_changing)),
     ?assertMatch([ff_a, ff_b, ff_c], ?list_ff(disabled)),
