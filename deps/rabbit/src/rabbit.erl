@@ -68,12 +68,12 @@
                     {requires,    pre_boot},
                     {enables,     external_infrastructure}]}).
 
--rabbit_boot_step({rabbit_ff_controller,
-                   [{description, "feature flags controller"},
-                    {mfa,         {rabbit_sup, start_child,
-                                   [rabbit_ff_controller]}},
-                    {requires,    feature_flags},
-                    {enables,     external_infrastructure}]}).
+% XXX -rabbit_boot_step({rabbit_ff_controller,
+% XXX                    [{description, "feature flags controller"},
+% XXX                     {mfa,         {rabbit_sup, start_child,
+% XXX                                    [rabbit_ff_controller]}},
+% XXX                     {requires,    feature_flags},
+% XXX                     {enables,     external_infrastructure}]}).
 
 -rabbit_boot_step({database,
                    [{mfa,         {rabbit_mnesia, init, []}},
@@ -875,6 +875,9 @@ start(normal, []) ->
         end,
         log_motd(),
         {ok, SupPid} = rabbit_sup:start_link(),
+
+        %% XXX
+        ok = rabbit_sup:start_child(rabbit_ff_controller),
 
         %% Compatibility with older RabbitMQ versions + required by
         %% rabbit_node_monitor:notify_node_up/0:

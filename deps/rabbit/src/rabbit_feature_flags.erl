@@ -315,29 +315,30 @@ enable(FeatureNames) when is_list(FeatureNames) ->
 
 enable_v1(FeatureName) ->
     rabbit_log_feature_flags:debug(
-      "Feature flag `~s`: REQUEST TO ENABLE",
+      "Feature flags: `~s`: REQUEST TO ENABLE",
       [FeatureName]),
     case is_enabled(FeatureName) of
         true ->
             rabbit_log_feature_flags:debug(
-              "Feature flag `~s`: already enabled",
+              "Feature flags: `~s`: already enabled",
               [FeatureName]),
             ok;
         false ->
             rabbit_log_feature_flags:debug(
-              "Feature flag `~s`: not enabled, check if supported by cluster",
+              "Feature flags: `~s`: not enabled, check if supported by "
+              "cluster",
               [FeatureName]),
             %% The feature flag must be supported locally and remotely
             %% (i.e. by all members of the cluster).
             case is_supported(FeatureName) of
                 true ->
                     rabbit_log_feature_flags:info(
-                      "Feature flag `~s`: supported, attempt to enable...",
+                      "Feature flags: `~s`: supported, attempt to enable...",
                       [FeatureName]),
                     do_enable(FeatureName);
                 false ->
                     rabbit_log_feature_flags:error(
-                      "Feature flag `~s`: not supported",
+                      "Feature flags: `~s`: not supported",
                       [FeatureName]),
                     {error, unsupported}
             end
@@ -907,11 +908,20 @@ maybe_initialize_registry(NewSupportedFeatureFlags,
                          false ->
                              NewFeatureStates
                      end,
-    FeatureStates = maps:filter(
-                      fun(_, true) -> true;
-                         (_, state_changing) -> true;
-                         (_, false) -> false
-                      end, FeatureStates0),
+% XXX     FeatureStates = maps:filter(
+% XXX                       fun(_, true) -> true;
+% XXX                          (_, state_changing) -> true;
+% XXX                          (_, false) -> false
+% XXX                       end, FeatureStates0),
+    FeatureStates = maps:map(
+                      fun(FeatureName, _FeatureProps) ->
+                              case FeatureStates0 of
+                                  #{FeatureName := FeatureState} ->
+                                      FeatureState;
+                                  _ ->
+                                      false
+                              end
+                      end, AllFeatureFlags),
 
     %% The feature flags inventory is used by rabbit_ff_controller to query
     %% feature flags atomically. The inventory also contains the list of
@@ -921,9 +931,6 @@ maybe_initialize_registry(NewSupportedFeatureFlags,
     Inventory = #{applications => lists:sort(ScannedApps),
                   feature_flags => KnownFeatureFlags2,
                   states => FeatureStates},
-    rabbit_log_feature_flags:debug(
-      "Feature flags: inventory = ~p",
-      [Inventory]),
 
     Proceed = does_registry_need_refresh(AllFeatureFlags,
                                          FeatureStates,
@@ -1011,24 +1018,25 @@ do_initialize_registry(RegistryVsn,
                        Inventory,
                        WrittenToDisk) ->
     %% We log the state of those feature flags.
-    rabbit_log_feature_flags:info(
+    rabbit_log_feature_flags:debug(
       "Feature flags: list of feature flags found:"),
     lists:foreach(
       fun(FeatureName) ->
-              rabbit_log_feature_flags:info(
+              rabbit_log_feature_flags:debug(
                 "Feature flags:   [~s] ~s",
                 [case maps:is_key(FeatureName, FeatureStates) of
                      true ->
                          case maps:get(FeatureName, FeatureStates) of
                              true           -> "x";
-                             state_changing -> "~"
+                             state_changing -> "~";
+                             false          -> " "
                          end;
                      false ->
                          " "
                  end,
                  FeatureName])
       end, lists:sort(maps:keys(AllFeatureFlags))),
-    rabbit_log_feature_flags:info(
+    rabbit_log_feature_flags:debug(
       "Feature flags: feature flag states written to disk: ~s",
       [case WrittenToDisk of
            true  -> "yes";
@@ -1206,6 +1214,10 @@ regen_registry_mod(RegistryVsn,
                             fun(FeatureName, _) ->
                                     not maps:is_key(FeatureName,
                                                     FeatureStates)
+                                    orelse
+                                    maps:get(FeatureName, FeatureStates)
+                                    =:=
+                                    false
                             end, AllFeatureFlags),
     ListDisabledBody = erl_syntax:abstract(DisabledFeatureFlags),
     ListDisabledClause = erl_syntax:clause(
@@ -1582,7 +1594,7 @@ enable_locally(FeatureName) when is_atom(FeatureName) ->
             ok;
         false ->
             rabbit_log_feature_flags:debug(
-              "Feature flag `~s`: enable locally (as part of feature "
+              "Feature flags: `~s`: enable locally (as part of feature "
               "flag states synchronization)",
               [FeatureName]),
             do_enable_locally(FeatureName)
@@ -1614,7 +1626,7 @@ enable_dependencies(FeatureName, Everywhere) ->
     FeatureProps = rabbit_ff_registry:get(FeatureName),
     DependsOn = maps:get(depends_on, FeatureProps, []),
     rabbit_log_feature_flags:debug(
-      "Feature flag `~s`: enable dependencies: ~p",
+      "Feature flags: `~s`: enable dependencies: ~p",
       [FeatureName, DependsOn]),
     enable_dependencies(FeatureName, DependsOn, Everywhere).
 
@@ -1647,7 +1659,7 @@ run_migration_fun(FeatureName, FeatureProps, Arg) ->
         {MigrationMod, MigrationFun}
           when is_atom(MigrationMod) andalso is_atom(MigrationFun) ->
             rabbit_log_feature_flags:debug(
-              "Feature flag `~s`: run migration function ~p with arg: ~p",
+              "Feature flags: `~s`: run migration function ~p with arg: ~p",
               [FeatureName, MigrationFun, Arg]),
             try
                 erlang:apply(MigrationMod,
@@ -1656,7 +1668,8 @@ run_migration_fun(FeatureName, FeatureProps, Arg) ->
             catch
                 _:Reason:Stacktrace ->
                     rabbit_log_feature_flags:error(
-                      "Feature flag `~s`: migration function crashed: ~p~n~p",
+                      "Feature flags: `~s`: migration function crashed: "
+                      "~p~n~p",
                       [FeatureName, Reason, Stacktrace]),
                     {error, {migration_fun_crash, Reason, Stacktrace}}
             end;
@@ -1664,7 +1677,7 @@ run_migration_fun(FeatureName, FeatureProps, Arg) ->
             {error, no_migration_fun};
         Invalid ->
             rabbit_log_feature_flags:error(
-              "Feature flag `~s`: invalid migration function: ~p",
+              "Feature flags: `~s`: invalid migration function: ~p",
               [FeatureName, Invalid]),
             {error, {invalid_migration_fun, Invalid}}
     end.
@@ -1686,8 +1699,8 @@ mark_as_enabled(FeatureName, IsEnabled) ->
 %% @private
 
 mark_as_enabled_locally(FeatureName, IsEnabled) ->
-    rabbit_log_feature_flags:info(
-      "Feature flag `~s`: mark as enabled=~p",
+    rabbit_log_feature_flags:debug(
+      "Feature flags: `~s`: mark as enabled=~p",
       [FeatureName, IsEnabled]),
     EnabledFeatureNames = maps:keys(list(enabled)),
     NewEnabledFeatureNames = case IsEnabled of
@@ -2357,10 +2370,15 @@ verify_which_feature_flags_are_actually_enabled() ->
 -spec refresh_feature_flags_after_app_load([atom()]) ->
     ok | {error, any()} | no_return().
 
-refresh_feature_flags_after_app_load([]) ->
-    ok;
 refresh_feature_flags_after_app_load(Apps) ->
-    %% TODO: feature_flags_v2 version.
+    case is_enabled(feature_flags_v2) of
+        true  -> rabbit_ff_controller:refresh_after_app_load();
+        false -> refresh_feature_flags_after_app_load_v1(Apps)
+    end.
+
+refresh_feature_flags_after_app_load_v1([]) ->
+    ok;
+refresh_feature_flags_after_app_load_v1(Apps) ->
     rabbit_log_feature_flags:debug(
       "Feature flags: new apps loaded: ~p -> refreshing feature flags",
       [Apps]),

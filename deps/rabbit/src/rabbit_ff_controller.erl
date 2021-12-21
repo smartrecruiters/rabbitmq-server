@@ -15,7 +15,8 @@
 -export([enable/1,
          disable/1,
          check_node_compatibility/1,
-         sync_cluster/0]).
+         sync_cluster/0,
+         refresh_after_app_load/0]).
 
 %% Internal use only.
 -export([start_link/0,
@@ -77,6 +78,13 @@ sync_cluster() ->
        #{domain => ?RMQLOG_DOMAIN_FEAT_FLAGS}),
     gen_statem:call(?LOCAL_NAME, sync_cluster).
 
+refresh_after_app_load() ->
+    ?LOG_DEBUG(
+       "Feature flags: REFRESHING after applications load...",
+       [],
+       #{domain => ?RMQLOG_DOMAIN_FEAT_FLAGS}),
+    gen_statem:call(?LOCAL_NAME, refresh_after_app_load).
+
 %% --------------------------------------------------------------------
 %% gen_statem callbacks.
 %% --------------------------------------------------------------------
@@ -90,20 +98,11 @@ init(_Args) ->
 standing_by(
   {call, From} = EventType, EventContent, none)
   when EventContent =/= notify_when_done ->
-    case EventContent of
-        {enable, FeatureNames} ->
-            ?LOG_NOTICE(
-               "Feature flags: attempt to enable the following feature "
-               "flags: ~p",
-               [FeatureNames],
-               #{domain => ?RMQLOG_DOMAIN_FEAT_FLAGS});
-        sync_cluster ->
-            ?LOG_NOTICE(
-               "Feature flags: attempt to synchronize feature flag states "
-               "among running cluster members",
-               [],
-               #{domain => ?RMQLOG_DOMAIN_FEAT_FLAGS})
-    end,
+    ?LOG_DEBUG(
+       "Feature flags: registering controller globally before "
+       "proceeding with task: ~p",
+       [EventContent],
+       #{domain => ?RMQLOG_DOMAIN_FEAT_FLAGS}),
 
     %% The first step is to register this process globally (it is already
     %% registered locally). The purpose is to make sure this one takes full
@@ -181,6 +180,11 @@ waiting_for_end_of_controller_task(
 updating_feature_flag_states(
   internal, Task, #?MODULE{from = From} = Data) ->
     Reply = proceed_with_task(Task),
+
+    ?LOG_DEBUG(
+       "Feature flags: unregistering controller globally",
+       [],
+       #{domain => ?RMQLOG_DOMAIN_FEAT_FLAGS}),
     unregister_globally(),
     notify_waiting_controllers(Data),
     {next_state, standing_by, none, [{reply, From, Reply}]};
@@ -195,7 +199,9 @@ proceed_with_task({enable, FeatureNames}) ->
 proceed_with_task({check_node_compatibility, NodeA, NodeB}) ->
     check_node_compatibility_task(NodeA, NodeB);
 proceed_with_task(sync_cluster) ->
-    sync_cluster_task().
+    sync_cluster_task();
+proceed_with_task(refresh_after_app_load) ->
+    refresh_after_app_load_task().
 
 terminate(_Reason, _State, _Data) ->
     ok.
@@ -296,6 +302,12 @@ sync_cluster_task() ->
             Error
     end.
 
+refresh_after_app_load_task() ->
+    case rabbit_feature_flags:initialize_registry() of
+        ok    -> sync_cluster_task();
+        Error -> Error
+    end.
+
 enable_many(Inventory, [FeatureName | Rest]) ->
     case enable_if_supported(Inventory, FeatureName) of
         ok    -> enable_many(Inventory, Rest);
@@ -358,19 +370,37 @@ enable_with_registry_locked(Inventory, FeatureName) ->
                #{domain => ?RMQLOG_DOMAIN_FEAT_FLAGS}),
             {ok, Inventory};
         _ ->
-            enable_where_disabled(Inventory, FeatureName)
+            ?LOG_NOTICE(
+               "Feature flags: attempt to enable `~s`...",
+               [FeatureName],
+               #{domain => ?RMQLOG_DOMAIN_FEAT_FLAGS}),
+
+            case update_feature_state_and_enable(Inventory, FeatureName) of
+                {ok, _Inventory} = Ok ->
+                    ?LOG_NOTICE(
+                       "Feature flags: `~s` enabled",
+                       [FeatureName],
+                       #{domain => ?RMQLOG_DOMAIN_FEAT_FLAGS}),
+                    Ok;
+                Error ->
+                    ?LOG_ERROR(
+                       "Feature flags: failed to enable `~s`: ~p",
+                       [FeatureName, Error],
+                       #{domain => ?RMQLOG_DOMAIN_FEAT_FLAGS}),
+                    Error
+            end
     end.
 
-enable_where_disabled(Inventory, FeatureName) ->
+update_feature_state_and_enable(Inventory, FeatureName) ->
     %% The feature flag is marked as `state_changing' on all running nodes who
     %% know it, including those where it's already enabled. The idea is that
     %% the feature flag is between two states on some nodes and the code
     %% running on the nodes where the feature flag enabled shouldn't assume
     %% all nodes in the cluster are in the same situation.
     Nodes = list_nodes_who_know_the_feature_flag(Inventory, FeatureName),
-    Ret1 = mark_as_enabled_on_nodes(
-             Nodes, Inventory, FeatureName, state_changing),
-    case Ret1 of
+    Ret = mark_as_enabled_on_nodes(
+            Nodes, Inventory, FeatureName, state_changing),
+    case Ret of
         %% We ignore the returned updated inventory because we don't need or
         %% even want to remember the `state_changing' state. This is only used
         %% for external queries of the registry.
@@ -469,10 +499,10 @@ collect_inventory_on_nodes(
     case rpc_call(Node, rabbit_ff_registry, inventory, [], Timeout) of
         #{feature_flags := FeatureFlags1,
           applications := ScannedApps,
-          states := States} ->
+          states := FeatureStates} ->
             FeatureFlags2 = maps:merge(FeatureFlags, FeatureFlags1),
             ScannedAppsPerNode1 = ScannedAppsPerNode#{Node => ScannedApps},
-            StatesPerNode1 = StatesPerNode#{Node => States},
+            StatesPerNode1 = StatesPerNode#{Node => FeatureStates},
             Inventory1 = Inventory#{
                            feature_flags => FeatureFlags2,
                            applications_per_node => ScannedAppsPerNode1,
@@ -489,14 +519,14 @@ list_feature_flags_enabled_somewhere(
     %% We want to collect feature flags which are enabled on at least one
     %% node.
     MergedStates = maps:fold(
-                     fun(_Node, States, Acc1) ->
+                     fun(_Node, FeatureStates, Acc1) ->
                              maps:fold(
                                fun
                                    (FeatureName, true, Acc2) ->
                                        Acc2#{FeatureName => true};
                                    (_FeatureName, false, Acc2) ->
                                        Acc2
-                               end, Acc1, States)
+                               end, Acc1, FeatureStates)
                      end, #{}, StatesPerNode),
     lists:sort(maps:keys(MergedStates)).
 
@@ -506,8 +536,8 @@ list_nodes_who_know_the_feature_flag(
     lists:sort(
       maps:keys(
         maps:filter(
-          fun(_Node, States) ->
-                  maps:is_key(FeatureName, States)
+          fun(_Node, FeatureStates) ->
+                  maps:is_key(FeatureName, FeatureStates)
           end, StatesPerNode))).
 
 list_nodes_where_feature_flag_is_disabled(
@@ -516,8 +546,8 @@ list_nodes_where_feature_flag_is_disabled(
     lists:sort(
       maps:keys(
         maps:filter(
-          fun(_Node, States) ->
-                  case States of
+          fun(_Node, FeatureStates) ->
+                  case FeatureStates of
                       %% The feature flag is known on this node, run the
                       %% migration function only if it is disabled.
                       #{FeatureName := Enabled} -> not Enabled;
@@ -629,14 +659,14 @@ mark_as_enabled_on_nodes(
 mark_as_enabled_on_nodes(
   [Node | Rest], StatesPerNode, FeatureName, IsEnabled, Timeout) ->
     ?LOG_DEBUG(
-       "Feature flags: ~s: mark as enabled=~p on node ~p",
+       "Feature flags: `~s`: mark as enabled=~p on node ~p",
        [FeatureName, IsEnabled, Node],
        #{domain => ?RMQLOG_DOMAIN_FEAT_FLAGS}),
     case mark_as_enabled_on_node(Node, FeatureName, IsEnabled, Timeout) of
         ok ->
-            States = maps:get(Node, StatesPerNode),
-            States1 = States#{FeatureName => IsEnabled},
-            StatesPerNode1 = StatesPerNode#{Node => States1},
+            FeatureStates = maps:get(Node, StatesPerNode),
+            FeatureStates1 = FeatureStates#{FeatureName => IsEnabled},
+            StatesPerNode1 = StatesPerNode#{Node => FeatureStates1},
             mark_as_enabled_on_nodes(
               Rest, StatesPerNode1, FeatureName, IsEnabled, Timeout);
         Error ->
@@ -714,7 +744,8 @@ run_migration_fun_locally(FeatureName, FeatureProps, Arg) ->
         {MigrationMod, MigrationFun}
           when is_atom(MigrationMod) andalso is_atom(MigrationFun) ->
             ?LOG_DEBUG(
-               "Feature flags: `~s`: run migration function ~p with arg: ~p",
+               "Feature flags: `~s`: run migration function `~p` with arg: "
+               "~p",
                [FeatureName, MigrationFun, Arg],
                #{domain => ?RMQLOG_DOMAIN_FEAT_FLAGS}),
             try
