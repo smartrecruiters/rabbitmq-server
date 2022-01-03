@@ -925,7 +925,7 @@ maybe_initialize_registry(NewSupportedFeatureFlags,
 
     %% The feature flags inventory is used by rabbit_ff_controller to query
     %% feature flags atomically. The inventory also contains the list of
-    %% scanner applications: this is used to determine if an application is
+    %% scanned applications: this is used to determine if an application is
     %% known by this node or not, and decide if a missing feature flag is
     %% unknown or unsupported.
     Inventory = #{applications => lists:sort(ScannedApps),
