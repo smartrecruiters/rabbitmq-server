@@ -111,17 +111,16 @@
 
 %% RabbitMQ internal use only.
 -export([initialize_registry/0,
-         initialize_registry/1,
          mark_as_enabled_locally/2,
          remote_nodes/0,
          running_remote_nodes/0,
          does_node_support/3,
          merge_feature_flags_from_unknown_apps/1,
-         do_sync_feature_flags_with_node/1]).
+         do_sync_feature_flags_with_node/1,
+         inject_test_feature_flags/1]).
 
 -ifdef(TEST).
--export([inject_test_feature_flags/1,
-         initialize_registry/3,
+-export([initialize_registry/3,
          query_supported_feature_flags/0,
          mark_as_enabled_remotely/2,
          mark_as_enabled_remotely/4,
@@ -1051,28 +1050,51 @@ do_initialize_registry(RegistryVsn,
                        Inventory,
                        WrittenToDisk).
 
--spec query_supported_feature_flags() -> {ScannedApps, FeatureFlags} when
-      ScannedApps :: [atom()],
-      FeatureFlags :: feature_flags().
-%% @private
-
--ifdef(TEST).
 -define(PT_TESTSUITE_ATTRS, {?MODULE, testsuite_feature_flags_attrs}).
 
-inject_test_feature_flags(AttributesFromTestsuite) ->
+inject_test_feature_flags(FeatureFlags) ->
+    ExistingAppAttrs = module_attributes_from_testsuite(),
+    FeatureFlagsPerApp0 = lists:foldl(
+                            fun({Origin, Origin, FFlags}, Acc) ->
+                                    Acc#{Origin => maps:from_list(FFlags)}
+                            end, #{}, ExistingAppAttrs),
+    FeatureFlagsPerApp1 = maps:fold(
+                            fun(FeatureName, FeatureProps, Acc) ->
+                                    Origin = case FeatureProps of
+                                                 #{provided_by := App} ->
+                                                     App;
+                                                 _ ->
+                                                     '$injected'
+                                             end,
+                                    FFlags0 = maps:get(Origin, Acc, #{}),
+                                    FFlags1 = FFlags0#{
+                                                FeatureName => FeatureProps},
+                                    Acc#{Origin => FFlags1}
+                            end, FeatureFlagsPerApp0, FeatureFlags),
+    AttributesFromTestsuite = maps:fold(
+                                fun(Origin, FFlags, Acc) ->
+                                        [{Origin, % Application
+                                          Origin, % Module
+                                          maps:to_list(FFlags)} | Acc]
+                                end, [], FeatureFlagsPerApp1),
     rabbit_log_feature_flags:debug(
-      "Feature flags: injecting feature flags from testsuite: ~p",
-      [AttributesFromTestsuite]),
+      "Feature flags: injecting feature flags from testsuite:  ~p~n"
+      "Feature flags: all injected feature flags: ~p",
+      [FeatureFlags, AttributesFromTestsuite]),
     ok = persistent_term:put(?PT_TESTSUITE_ATTRS, AttributesFromTestsuite),
     initialize_registry().
 
 module_attributes_from_testsuite() ->
     persistent_term:get(?PT_TESTSUITE_ATTRS, []).
 
+-spec query_supported_feature_flags() -> {ScannedApps, FeatureFlags} when
+      ScannedApps :: [atom()],
+      FeatureFlags :: feature_flags().
+%% @private
+
 query_supported_feature_flags() ->
     rabbit_log_feature_flags:debug(
-      "Feature flags: query feature flags in loaded applications "
-      "+ testsuite"),
+      "Feature flags: query feature flags in loaded applications"),
     T0 = erlang:timestamp(),
     ScannedApps = rabbit_misc:rabbitmq_related_apps(),
     AttributesPerApp = rabbit_misc:module_attributes_from_apps(
@@ -1084,20 +1106,6 @@ query_supported_feature_flags() ->
       [timer:now_diff(T1, T0)]),
     AllAttributes = AttributesPerApp ++ AttributesFromTestsuite,
     {ScannedApps, prepare_queried_feature_flags(AllAttributes, #{})}.
--else.
-query_supported_feature_flags() ->
-    rabbit_log_feature_flags:debug(
-      "Feature flags: query feature flags in loaded applications"),
-    T0 = erlang:timestamp(),
-    ScannedApps = rabbit_misc:rabbitmq_related_apps(),
-    AttributesPerApp = rabbit_misc:module_attributes_from_apps(
-                         rabbit_feature_flag, ScannedApps),
-    T1 = erlang:timestamp(),
-    rabbit_log_feature_flags:debug(
-      "Feature flags: time to find supported feature flags: ~p µs",
-      [timer:now_diff(T1, T0)]),
-    {ScannedApps, prepare_queried_feature_flags(AttributesPerApp, #{})}.
--endif.
 
 prepare_queried_feature_flags([{App, _Module, Attributes} | Rest],
                               AllFeatureFlags) ->
