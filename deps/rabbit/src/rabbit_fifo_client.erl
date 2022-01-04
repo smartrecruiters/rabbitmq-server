@@ -186,7 +186,7 @@ enqueue(Correlation, Msg,
     Cmd = rabbit_fifo:make_enqueue(self(), Next, Msg),
     case send_command(Node, Correlation, Cmd, low, State1) of
         {slow, State} when not Slow ->
-            BlockFun(),
+            % BlockFun(),
             {slow, set_timer(State)};
         Any ->
             Any
@@ -585,7 +585,7 @@ handle_ra_event(From, {applied, Seqs},
                                                 S
                                         end
                                 end, State2, Commands),
-            UnblockFun(),
+            % UnblockFun(),
             {ok, State, Actions};
         _ ->
             {ok, State1, Actions}
