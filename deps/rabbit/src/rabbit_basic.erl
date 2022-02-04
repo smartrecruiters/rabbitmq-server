@@ -341,7 +341,7 @@ peek_fmt_message(#basic_message{exchange_name = Ex,
               Acc;
           (KV, Acc) ->
               [KV | Acc]
-      end, [], [{<<"payload (max 64 bytes)">>,
+      end, [], [{<<"payload (max 64 bytes test)">>,
                  %% restric payload to 64 bytes
                  binary_prefix_64(iolist_to_binary(lists:reverse(Payl0)), 64)},
                 {<<"exchange">>, Ex#resource.name},
